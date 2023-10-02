@@ -195,6 +195,7 @@ def output_algorithm(out: OutputBuffer, alg_db: Dict[str, Dict[str, List[List[Op
 
     alg_name = alg_name_with_size if alg_name_with_size is not None else alg_name
     first = True
+    use_good_for_all = False
     for level, text in texts:
         if level == 'fail':
             program_retval = exitcodes.FAILURE
@@ -203,9 +204,13 @@ def output_algorithm(out: OutputBuffer, alg_db: Dict[str, Dict[str, List[List[Op
 
         f = getattr(out, level)
         comment = (padding + ' -- [' + level + '] ' + text) if text != '' else ''
+
+        # If the first algorithm's comment is an 'info', this implies that it is rated good.  Hence, the out.good() function should be used to write all subsequent notes for this algorithm as well.
+        if (first and level == 'info') or use_good_for_all:
+            f = out.good
+            use_good_for_all = True
+
         if first:
-            if first and level == 'info':
-                f = out.good
             f(prefix + alg_name + comment)
             first = False
         else:  # pylint: disable=else-if-used
@@ -896,13 +901,41 @@ def process_commandline(out: OutputBuffer, args: List[str], usage_cb: Callable[.
 
 def build_struct(target_host: str, banner: Optional['Banner'], cves: List[Dict[str, Union[str, float]]], kex: Optional['SSH2_Kex'] = None, pkm: Optional['SSH1_PublicKeyMessage'] = None, client_host: Optional[str] = None, software: Optional[Software] = None, algorithms: Optional[Algorithms] = None, algorithm_recommendation_suppress_list: Optional[List[str]] = None) -> Any:  # pylint: disable=too-many-arguments
 
+    def fetch_notes(algorithm: str, alg_type: str) -> Dict[str, List[Optional[str]]]:
+        '''Returns a dictionary containing the messages in the "fail", "warn", and "info" levels for this algorithm.'''
+        alg_db = SSH2_KexDB.get_db()
+        alg_info = {}
+        if algorithm in alg_db[alg_type]:
+            alg_desc = alg_db[alg_type][algorithm]
+            alg_desc_len = len(alg_desc)
+
+            # If a list for the failure notes exists, add it to the return value.  Similarly, add the related lists for the warnings and informational notes.
+            if (alg_desc_len >= 2) and (len(alg_desc[1]) > 0):
+                alg_info["fail"] = alg_desc[1]
+            if (alg_desc_len >= 3) and (len(alg_desc[2]) > 0):
+                alg_info["warn"] = alg_desc[2]
+            if (alg_desc_len >= 4) and (len(alg_desc[3]) > 0):
+                alg_info["info"] = alg_desc[3]
+
+            # Add information about when this algorithm was implemented in OpenSSH/Dropbear.
+            since_text = Algorithm.get_since_text(alg_desc[0])
+            if (since_text is not None) and (len(since_text) > 0):
+                # Add the "info" key with an empty list if the if-block above didn't create it already.
+                if "info" not in alg_info:
+                    alg_info["info"] = []
+                alg_info["info"].append(since_text)
+        else:
+            alg_info["fail"] = [SSH2_KexDB.FAIL_UNKNOWN]
+
+        return alg_info
+
     banner_str = ''
     banner_protocol = None
     banner_software = None
     banner_comments = None
     if banner is not None:
         banner_str = str(banner)
-        banner_protocol = banner.protocol
+        banner_protocol = '.'.join(str(x) for x in banner.protocol)
         banner_software = banner.software
         banner_comments = banner.comments
 
@@ -927,19 +960,22 @@ def build_struct(target_host: str, banner: Optional['Banner'], cves: List[Dict[s
         res['kex'] = []
         dh_alg_sizes = kex.dh_modulus_sizes()
         for algorithm in kex.kex_algorithms:
+            alg_notes = fetch_notes(algorithm, 'kex')
             entry: Any = {
                 'algorithm': algorithm,
+                'notes': alg_notes,
             }
             if algorithm in dh_alg_sizes:
                 hostkey_size = dh_alg_sizes[algorithm]
                 entry['keysize'] = hostkey_size
             res['kex'].append(entry)
-
         res['key'] = []
         host_keys = kex.host_keys()
         for algorithm in kex.key_algorithms:
+            alg_notes = fetch_notes(algorithm, 'key')
             entry = {
                 'algorithm': algorithm,
+                'notes': alg_notes,
             }
             if algorithm in host_keys:
                 hostkey_info = host_keys[algorithm]
@@ -959,8 +995,24 @@ def build_struct(target_host: str, banner: Optional['Banner'], cves: List[Dict[s
                     entry['casize'] = ca_size
             res['key'].append(entry)
 
-        res['enc'] = kex.server.encryption
-        res['mac'] = kex.server.mac
+        res['enc'] = []
+        for algorithm in kex.server.encryption:
+            alg_notes = fetch_notes(algorithm, 'enc')
+            entry = {
+                'algorithm': algorithm,
+                'notes': alg_notes,
+            }
+            res['enc'].append(entry)
+
+        res['mac'] = []
+        for algorithm in kex.server.mac:
+            alg_notes = fetch_notes(algorithm, 'mac')
+            entry = {
+                'algorithm': algorithm,
+                'notes': alg_notes,
+            }
+            res['mac'].append(entry)
+
         res['fingerprints'] = []
         host_keys = kex.host_keys()
 
@@ -1100,7 +1152,7 @@ def audit(out: OutputBuffer, aconf: AuditConf, sshv: Optional[int] = None, print
             if aconf.gex_test != '':
                 return run_gex_granular_modulus_size_test(out, s, kex, aconf)
             else:
-                GEXTest.run(out, s, kex)
+                GEXTest.run(out, s, banner, kex)
 
         # This is a standard audit scan.
         if (aconf.policy is None) and (aconf.make_policy is False):
