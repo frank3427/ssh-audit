@@ -80,7 +80,7 @@ class KexDH:  # pragma: nocover
     # contains the host key, among other things.  Function returns the host
     # key blob (from which the fingerprint can be calculated).
     def recv_reply(self, s: 'SSH_Socket', parse_host_key_size: bool = True) -> Optional[bytes]:
-        # Reset the CA info, in case it was set from a prior invokation.
+        # Reset the CA info, in case it was set from a prior invocation.
         self.__hostkey_type = ''
         self.__hostkey_e = 0  # pylint: disable=unused-private-member
         self.__hostkey_n = 0  # pylint: disable=unused-private-member
@@ -100,7 +100,7 @@ class KexDH:  # pragma: nocover
             # A connection error occurred.  We can't parse anything, so just
             # return.  The host key modulus (and perhaps certificate modulus)
             # will remain at length 0.
-            self.out.d("KexDH.recv_reply(): received packge_type == -1.")
+            self.out.d("KexDH.recv_reply(): received package_type == -1.")
             return None
 
         # Get the host key blob, F, and signature.
@@ -134,6 +134,9 @@ class KexDH:  # pragma: nocover
         if self.__hostkey_type == 'ssh-ed25519':
             self.out.d("%s has a fixed host key modulus of 32." % self.__hostkey_type)
             self.__hostkey_n_len = 32
+        elif self.__hostkey_type == 'ssh-ed448':
+            self.out.d("%s has a fixed host key modulus of 57." % self.__hostkey_type)
+            self.__hostkey_n_len = 57
         else:
             # Here is the modulus size & actual modulus of the host key public key.
             hostkey_n, self.__hostkey_n_len, ptr = KexDH.__get_bytes(hostkey, ptr)
@@ -211,6 +214,15 @@ class KexDH:  # pragma: nocover
 
                 # CA's modulus.  Bingo.
                 ca_key_n, ca_key_n_len, ptr = KexDH.__get_bytes(ca_key, ptr)  # pylint: disable=unused-variable
+
+                if ca_key_type.startswith("ecdsa-sha2-nistp") and ca_key_n_len > 0:
+                    self.out.d("Found ecdsa-sha2-nistp* CA key type.")
+
+                    # 0x04 signifies that this is an uncompressed public key (meaning that full X and Y values are provided in ca_key_n.
+                    if ca_key_n[0] == 4:
+                        ca_key_n_len = ca_key_n_len - 1  # Subtract the 0x04 byte.
+                        ca_key_n_len = int(ca_key_n_len / 2)  # Divide by 2 since the modulus is the size of either the X or Y value.
+
 
         else:
             self.out.d("Certificate type %u found; this is not usually valid in the context of a host key!  Skipping it..." % cert_type)

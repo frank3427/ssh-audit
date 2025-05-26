@@ -8,7 +8,6 @@ class TestAuditConf:
     def init(self, ssh_audit):
         self.AuditConf = ssh_audit.AuditConf
         self.OutputBuffer = ssh_audit.OutputBuffer()
-        self.usage = ssh_audit.usage
         self.process_commandline = process_commandline
 
     @staticmethod
@@ -107,7 +106,7 @@ class TestAuditConf:
 
     def test_audit_conf_process_commandline(self):
         # pylint: disable=too-many-statements
-        c = lambda x: self.process_commandline(self.OutputBuffer, x.split(), self.usage)  # noqa
+        c = lambda x: self.process_commandline(self.OutputBuffer, x.split())  # noqa
         with pytest.raises(SystemExit):
             conf = c('')
         with pytest.raises(SystemExit):
@@ -163,7 +162,7 @@ class TestAuditConf:
         conf = c('-64 localhost')
         self._test_conf(conf, host='localhost', ipv4=True, ipv6=True, ipvo=(6, 4))
         conf = c('-b localhost')
-        self._test_conf(conf, host='localhost', batch=True, verbose=True)
+        self._test_conf(conf, host='localhost', batch=True)
         conf = c('-n localhost')
         self._test_conf(conf, host='localhost', colors=False)
         conf = c('-v localhost')

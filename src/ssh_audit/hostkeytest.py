@@ -1,7 +1,7 @@
 """
    The MIT License (MIT)
 
-   Copyright (C) 2017-2023 Joe Testa (jtesta@positronsecurity.com)
+   Copyright (C) 2017-2024 Joe Testa (jtesta@positronsecurity.com)
 
    Permission is hereby granted, free of charge, to any person obtaining a copy
    of this software and associated documentation files (the "Software"), to deal
@@ -40,7 +40,7 @@ class HostKeyTest:
     # Tracks the RSA host key types.  As of this writing, testing one in this family yields valid results for the rest.
     RSA_FAMILY = ['ssh-rsa', 'rsa-sha2-256', 'rsa-sha2-512']
 
-    # Dict holding the host key types we should extract & parse.  'cert' is True to denote that a host key type handles certificates (thus requires additional parsing).  'variable_key_len' is True for host key types that can have variable sizes (True only for RSA types, as the rest are of fixed-size).  After the host key type is fully parsed, the key 'parsed' is added with a value of True.
+    # Dict holding the host key types we should extract & parse.  'cert' is True to denote that a host key type handles certificates (thus requires additional parsing).  'variable_key_len' is True for host key types that can have variable sizes (True only for RSA types, as the rest are of fixed-size).
     HOST_KEY_TYPES = {
         'ssh-rsa':      {'cert': False, 'variable_key_len': True},
         'rsa-sha2-256': {'cert': False, 'variable_key_len': True},
@@ -52,6 +52,20 @@ class HostKeyTest:
 
         'ssh-ed25519':                      {'cert': False, 'variable_key_len': False},
         'ssh-ed25519-cert-v01@openssh.com': {'cert': True, 'variable_key_len': False},
+
+        'ssh-ed448':                      {'cert': False, 'variable_key_len': False},
+        # 'ssh-ed448-cert-v01@openssh.com': {'cert': True,  'variable_key_len': False},
+
+        'ecdsa-sha2-nistp256': {'cert': False, 'variable_key_len': False},
+        'ecdsa-sha2-nistp384': {'cert': False, 'variable_key_len': False},
+        'ecdsa-sha2-nistp521': {'cert': False, 'variable_key_len': False},
+
+        'ecdsa-sha2-nistp256-cert-v01@openssh.com': {'cert': True, 'variable_key_len': False},
+        'ecdsa-sha2-nistp384-cert-v01@openssh.com': {'cert': True, 'variable_key_len': False},
+        'ecdsa-sha2-nistp521-cert-v01@openssh.com': {'cert': True, 'variable_key_len': False},
+
+        'ssh-dss':                      {'cert': False, 'variable_key_len': True},
+        'ssh-dss-cert-v01@openssh.com': {'cert': True,  'variable_key_len': True},
     }
 
     TWO2K_MODULUS_WARNING = '2048-bit modulus only provides 112-bits of symmetric strength'
@@ -93,6 +107,7 @@ class HostKeyTest:
     def perform_test(out: 'OutputBuffer', s: 'SSH_Socket', server_kex: 'SSH2_Kex', kex_str: str, kex_group: 'KexDH', host_key_types: Dict[str, Dict[str, bool]]) -> None:
         hostkey_modulus_size = 0
         ca_modulus_size = 0
+        parsed_host_key_types = set()
 
         # If the connection still exists, close it so we can test
         # using a clean slate (otherwise it may exist in a non-testable
@@ -106,7 +121,7 @@ class HostKeyTest:
             key_warn_comments = []
 
             # Skip those already handled (i.e.: those in the RSA family, as testing one tests them all).
-            if 'parsed' in host_key_types[host_key_type] and host_key_types[host_key_type]['parsed']:
+            if host_key_type in parsed_host_key_types:
                 continue
 
             # If this host key type is supported by the server, we test it.
@@ -136,7 +151,12 @@ class HostKeyTest:
                         _, payload = s.read_packet()
                         SSH2_Kex.parse(out, payload)
                     except Exception:
-                        out.v("Failed to parse server's kex.  Stack trace:\n%s" % str(traceback.format_exc()), write_now=True)
+                        msg = "Failed to parse server's kex."
+                        if not out.debug:
+                            msg += "  Re-run in debug mode to see stack trace."
+
+                        out.v(msg, write_now=True)
+                        out.d("Stack trace:\n%s" % str(traceback.format_exc()), write_now=True)
                         return
 
                 # Do the initial DH exchange.  The server responds back
@@ -147,7 +167,12 @@ class HostKeyTest:
                     kex_reply = kex_group.recv_reply(s)
                     raw_hostkey_bytes = kex_reply if kex_reply is not None else b''
                 except KexDHException:
-                    out.v("Failed to parse server's host key.  Stack trace:\n%s" % str(traceback.format_exc()), write_now=True)
+                    msg = "Failed to parse server's host key."
+                    if not out.debug:
+                        msg += "  Re-run in debug mode to see stack trace."
+
+                    out.v(msg, write_now=True)
+                    out.d("Stack trace:\n%s" % str(traceback.format_exc()), write_now=True)
 
                     # Since parsing this host key failed, there's nothing more to do but close the socket and move on to the next host key type.
                     s.close()
@@ -157,6 +182,7 @@ class HostKeyTest:
                 ca_key_type = kex_group.get_ca_type()
                 ca_modulus_size = kex_group.get_ca_size()
                 out.d("Hostkey type: [%s]; hostkey size: %u; CA type: [%s]; CA modulus size: %u" % (host_key_type, hostkey_modulus_size, ca_key_type, ca_modulus_size), write_now=True)
+                out.d("Raw hostkey bytes (%d): [%s]" % (len(raw_hostkey_bytes), raw_hostkey_bytes.hex()), write_now=True)
 
                 # Record all the host key info.
                 server_kex.set_host_key(host_key_type, raw_hostkey_bytes, hostkey_modulus_size, ca_key_type, ca_modulus_size)
@@ -180,13 +206,13 @@ class HostKeyTest:
                         hostkey_min_good = 256
                         hostkey_min_warn = 224
                         hostkey_warn_str = HostKeyTest.SMALL_ECC_MODULUS_WARNING
-                    if ca_key_type.startswith('ssh-ed25519') or host_key_type.startswith('ecdsa-sha2-nistp'):
+                    if ca_key_type.startswith('ssh-ed25519') or ca_key_type.startswith('ecdsa-sha2-nistp'):
                         cakey_min_good = 256
                         cakey_min_warn = 224
                         cakey_warn_str = HostKeyTest.SMALL_ECC_MODULUS_WARNING
 
                     # Keys smaller than 2048 result in a failure.  Keys smaller 3072 result in a warning.  Update the database accordingly.
-                    if (cert is False) and (hostkey_modulus_size < hostkey_min_good):
+                    if (cert is False) and (hostkey_modulus_size < hostkey_min_good) and (host_key_type != 'ssh-dss'):  # Skip ssh-dss, otherwise we get duplicate failure messages (SSH2_KexDB will always flag it).
 
                         # If the key is under 2048, add to the failure list.
                         if hostkey_modulus_size < hostkey_min_warn:
@@ -209,10 +235,14 @@ class HostKeyTest:
                         elif (0 < ca_modulus_size < cakey_min_good) and (cakey_warn_str not in key_warn_comments):
                             key_warn_comments.append(cakey_warn_str)
 
+                    # If the CA key type uses ECDSA with a NIST P-curve, fail it for possibly being back-doored.
+                    if ca_key_type.startswith('ecdsa-sha2-nistp'):
+                        key_fail_comments.append('CA key uses elliptic curves that are suspected as being backdoored by the U.S. National Security Agency')
+
                 # If this host key type is in the RSA family, then mark them all as parsed (since results in one are valid for them all).
                 if host_key_type in HostKeyTest.RSA_FAMILY:
                     for rsa_type in HostKeyTest.RSA_FAMILY:
-                        host_key_types[rsa_type]['parsed'] = True
+                        parsed_host_key_types.add(rsa_type)
 
                         # If the current key is a member of the RSA family, then populate all RSA family members with the same
                         # failure and/or warning comments.
@@ -224,7 +254,7 @@ class HostKeyTest:
                         db['key'][rsa_type][2].extend(key_warn_comments)
 
                 else:
-                    host_key_types[host_key_type]['parsed'] = True
+                    parsed_host_key_types.add(host_key_type)
                     db = SSH2_KexDB.get_db()
                     while len(db['key'][host_key_type]) < 3:
                         db['key'][host_key_type].append([])

@@ -2,7 +2,7 @@
 """
    The MIT License (MIT)
 
-   Copyright (C) 2017-2023 Joe Testa (jtesta@positronsecurity.com)
+   Copyright (C) 2017-2024 Joe Testa (jtesta@positronsecurity.com)
    Copyright (C) 2017 Andris Raugulis (moo@arthepsy.eu)
 
    Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -23,14 +23,16 @@
    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
    THE SOFTWARE.
 """
+import argparse
 import concurrent.futures
 import copy
-import getopt
 import json
+import multiprocessing
 import os
 import re
 import sys
 import traceback
+
 
 # pylint: disable=unused-import
 from typing import Dict, List, Set, Sequence, Tuple, Iterable  # noqa: F401
@@ -39,11 +41,12 @@ from typing import cast, Callable, Optional, Union, Any  # noqa: F401
 from ssh_audit.globals import SNAP_PACKAGE
 from ssh_audit.globals import SNAP_PERMISSIONS_ERROR
 from ssh_audit.globals import VERSION
-from ssh_audit.globals import WINDOWS_MAN_PAGE
+from ssh_audit.globals import BUILTIN_MAN_PAGE
 from ssh_audit.algorithm import Algorithm
 from ssh_audit.algorithms import Algorithms
 from ssh_audit.auditconf import AuditConf
 from ssh_audit.banner import Banner
+from ssh_audit.dheat import DHEat
 from ssh_audit import exitcodes
 from ssh_audit.fingerprint import Fingerprint
 from ssh_audit.gextest import GEXTest
@@ -59,7 +62,6 @@ from ssh_audit.ssh2_kex import SSH2_Kex
 from ssh_audit.ssh2_kexdb import SSH2_KexDB
 from ssh_audit.ssh_socket import SSH_Socket
 from ssh_audit.utils import Utils
-from ssh_audit.versionvulnerabilitydb import VersionVulnerabilityDB
 
 
 # no_idna_workaround = False
@@ -67,7 +69,7 @@ from ssh_audit.versionvulnerabilitydb import VersionVulnerabilityDB
 # Only import colorama under Windows.  Other OSes can natively handle terminal colors.
 if sys.platform == 'win32':
     try:
-        from colorama import just_fix_windows_console
+        from colorama import just_fix_windows_console  # type: ignore
         just_fix_windows_console()
     except ImportError:
         pass
@@ -79,43 +81,6 @@ if sys.platform == 'win32':
     #     ''.encode('idna')
     # except ImportError:
     #     no_idna_workaround = True
-
-
-def usage(uout: OutputBuffer, err: Optional[str] = None) -> None:
-    retval = exitcodes.GOOD
-    p = os.path.basename(sys.argv[0])
-    uout.head('# {} {}, https://github.com/jtesta/ssh-audit\n'.format(p, VERSION))
-    if err is not None and len(err) > 0:
-        uout.fail(err + '\n')
-        retval = exitcodes.UNKNOWN_ERROR
-    uout.info('usage: {0} [options] <host>\n'.format(p))
-    uout.info('   -h,  --help             print this help')
-    uout.info('   -1,  --ssh1             force ssh version 1 only')
-    uout.info('   -2,  --ssh2             force ssh version 2 only')
-    uout.info('   -4,  --ipv4             enable IPv4 (order of precedence)')
-    uout.info('   -6,  --ipv6             enable IPv6 (order of precedence)')
-    uout.info('   -b,  --batch            batch output')
-    uout.info('   -c,  --client-audit     starts a server on port 2222 to audit client\n                               software config (use -p to change port;\n                               use -t to change timeout)')
-    uout.info('   -d,  --debug            debug output')
-    uout.info('   -g,  --gex-test=<x[,y,...]>  dh gex modulus size test')
-    uout.info('                   <min1:pref1:max1[,min2:pref2:max2,...]>')
-    uout.info('                   <x-y[:step]>')
-    uout.info('   -j,  --json             JSON output (use -jj to enable indents)')
-    uout.info('   -l,  --level=<level>    minimum output level (info|warn|fail)')
-    uout.info('   -L,  --list-policies    list all the official, built-in policies')
-    uout.info('        --lookup=<alg1,alg2,...>    looks up an algorithm(s) without\n                                    connecting to a server')
-    uout.info('   -M,  --make-policy=<policy.txt>  creates a policy based on the target server\n                                    (i.e.: the target server has the ideal\n                                    configuration that other servers should\n                                    adhere to)')
-    uout.info('   -m,  --manual           print the man page (Windows only)')
-    uout.info('   -n,  --no-colors        disable colors')
-    uout.info('   -p,  --port=<port>      port to connect')
-    uout.info('   -P,  --policy=<policy.txt>  run a policy test using the specified policy')
-    uout.info('   -t,  --timeout=<secs>   timeout (in seconds) for connection and reading\n                               (default: 5)')
-    uout.info('   -T,  --targets=<hosts.txt>  a file containing a list of target hosts (one\n                                   per line, format HOST[:PORT]).  Use --threads\n                                   to control concurrent scans.')
-    uout.info('        --threads=<threads>    number of threads to use when scanning multiple\n                                   targets (-T/--targets) (default: 32)')
-    uout.info('   -v,  --verbose          verbose output')
-    uout.sep()
-    uout.write()
-    sys.exit(retval)
 
 
 def output_algorithms(out: OutputBuffer, title: str, alg_db: Dict[str, Dict[str, List[List[Optional[str]]]]], alg_type: str, algorithms: List[str], unknown_algs: List[str], is_json_output: bool, program_retval: int, maxlen: int = 0, host_keys: Optional[Dict[str, Dict[str, Union[bytes, str, int]]]] = None, dh_modulus_sizes: Optional[Dict[str, int]] = None) -> int:  # pylint: disable=too-many-arguments
@@ -253,64 +218,17 @@ def output_compatibility(out: OutputBuffer, algs: Algorithms, client_audit: bool
         out.good('(gen) compatibility: ' + ', '.join(comp_text))
 
 
-def output_security_sub(out: OutputBuffer, sub: str, software: Optional[Software], client_audit: bool, padlen: int) -> List[Dict[str, Union[str, float]]]:
-    ret: List[Dict[str, Union[str, float]]] = []
-
-    secdb = VersionVulnerabilityDB.CVE if sub == 'cve' else VersionVulnerabilityDB.TXT
-    if software is None or software.product not in secdb:
-        return ret
-    for line in secdb[software.product]:
-        vfrom: str = ''
-        vtill: str = ''
-        vfrom, vtill = line[0:2]
-        if not software.between_versions(vfrom, vtill):
-            continue
-        target: int = 0
-        name: str = ''
-        target, name = line[2:4]
-        is_server = target & 1 == 1
-        is_client = target & 2 == 2
-        # is_local = target & 4 == 4
-
-        # If this security entry applies only to servers, but we're testing a client, then skip it.  Similarly, skip entries that apply only to clients, but we're testing a server.
-        if (is_server and not is_client and client_audit) or (is_client and not is_server and not client_audit):
-            continue
-        p = '' if out.batch else ' ' * (padlen - len(name))
-        if sub == 'cve':
-            cvss: float = 0.0
-            descr: str = ''
-            cvss, descr = line[4:6]
-
-            # Critical CVSS scores (>= 8.0) are printed as a fail, otherwise they are printed as a warning.
-            out_func = out.warn
-            if cvss >= 8.0:
-                out_func = out.fail
-            out_func('(cve) {}{} -- (CVSSv2: {}) {}'.format(name, p, cvss, descr))
-            ret.append({'name': name, 'cvssv2': cvss, 'description': descr})
-        else:
-            descr = line[4]
-            out.fail('(sec) {}{} -- {}'.format(name, p, descr))
-
-    return ret
-
-
-def output_security(out: OutputBuffer, banner: Optional[Banner], client_audit: bool, padlen: int, is_json_output: bool) -> List[Dict[str, Union[str, float]]]:
-    cves = []
+def output_security(out: OutputBuffer, banner: Optional[Banner], padlen: int, is_json_output: bool) -> None:
 
     with out:
-        if banner is not None:
-            software = Software.parse(banner)
-            cves = output_security_sub(out, 'cve', software, client_audit, padlen)
-            _ = output_security_sub(out, 'txt', software, client_audit, padlen)
-            if banner.protocol[0] == 1:
-                p = '' if out.batch else ' ' * (padlen - 14)
-                out.fail('(sec) SSH v1 enabled{} -- SSH v1 can be exploited to recover plaintext passwords'.format(p))
+        if (banner is not None) and (banner.protocol[0] == 1):
+            p = '' if out.batch else ' ' * (padlen - 14)
+            out.fail('(sec) SSH v1 enabled{} -- SSH v1 can be exploited to recover plaintext passwords'.format(p))
+
     if not out.is_section_empty() and not is_json_output:
         out.head('# security')
         out.flush_section()
         out.sep()
-
-    return cves
 
 
 def output_fingerprints(out: OutputBuffer, algs: Algorithms, is_json_output: bool) -> None:
@@ -340,11 +258,19 @@ def output_fingerprints(out: OutputBuffer, algs: Algorithms, is_json_output: boo
         fp_types = sorted(fps.keys())
         for fp_type in fp_types:
             fp = fps[fp_type]
-            out.good('(fin) {}: {}'.format(fp_type, fp.sha256))
+
+            # Don't output any ECDSA or DSS fingerprints unless verbose mode is enabled.
+            if fp_type.startswith("ecdsa-") or (fp_type == "ssh-dss"):
+                if out.verbose:
+                    out.warn('(fin) {}: {} -- [info] this fingerprint type is insecure and should not be relied upon'.format(fp_type, fp.sha256))
+                else:
+                    continue  # If verbose mode is not enabled, skip this type entirely.
+            else:
+                out.good('(fin) {}: {}'.format(fp_type, fp.sha256))
 
             # Output the MD5 hash too if verbose mode is enabled.
             if out.verbose:
-                out.info('(fin) {}: {} -- [info] do not rely on MD5 fingerprints for server identification; it is insecure for this use case'.format(fp_type, fp.md5))
+                out.warn('(fin) {}: {} -- [info] do not rely on MD5 fingerprints for server identification; it is insecure for this use case'.format(fp_type, fp.md5))
 
     if not out.is_section_empty() and not is_json_output:
         out.head('# fingerprints')
@@ -356,34 +282,6 @@ def output_fingerprints(out: OutputBuffer, algs: Algorithms, is_json_output: boo
 def output_recommendations(out: OutputBuffer, algs: Algorithms, algorithm_recommendation_suppress_list: List[str], software: Optional[Software], is_json_output: bool, padlen: int = 0) -> bool:
 
     ret = True
-    # PuTTY's algorithms cannot be modified, so there's no point in issuing recommendations.
-    if (software is not None) and (software.product == Product.PuTTY):
-        max_vuln_version = 0.0
-        max_cvssv2_severity = 0.0
-        # Search the CVE database for the most recent vulnerable version and the max CVSSv2 score.
-        for cve_list in VersionVulnerabilityDB.CVE['PuTTY']:
-            vuln_version = float(cve_list[1])
-            cvssv2_severity = cve_list[4]
-
-            if vuln_version > max_vuln_version:
-                max_vuln_version = vuln_version
-            if cvssv2_severity > max_cvssv2_severity:
-                max_cvssv2_severity = cvssv2_severity
-
-        fn = out.warn
-        if max_cvssv2_severity > 8.0:
-            fn = out.fail
-
-        # Assuming that PuTTY versions will always increment by 0.01, we can calculate the first safe version by adding 0.01 to the latest vulnerable version.
-        current_version = float(software.version)
-        upgrade_to_version = max_vuln_version + 0.01
-        if current_version < upgrade_to_version:
-            out.head('# recommendations')
-            fn('(rec) Upgrade to PuTTY v%.2f' % upgrade_to_version)
-            out.sep()
-            ret = False
-        return ret
-
     level_to_output = {
         "informational": out.good,
         "warning": out.warn,
@@ -404,6 +302,8 @@ def output_recommendations(out: OutputBuffer, algs: Algorithms, algorithm_recomm
 
                         fn = level_to_output[level]
 
+                        an = '?'
+                        sg = '?'
                         if action == 'del':
                             an, sg = 'remove', '-'
                             ret = False
@@ -417,7 +317,7 @@ def output_recommendations(out: OutputBuffer, algs: Algorithms, algorithm_recomm
                             notes = " (%s)" % notes
 
                         fm = '(rec) {0}{1}{2}-- {3} algorithm to {4}{5} '
-                        fn(fm.format(sg, name, p, alg_type, an, notes))
+                        fn(fm.format(sg, name, p, alg_type, an, notes))  # type: ignore[operator]
 
     if not out.is_section_empty() and not is_json_output:
         if software is not None:
@@ -431,7 +331,7 @@ def output_recommendations(out: OutputBuffer, algs: Algorithms, algorithm_recomm
 
 
 # Output additional information & notes.
-def output_info(out: OutputBuffer, software: Optional['Software'], client_audit: bool, any_problems: bool, is_json_output: bool) -> None:
+def output_info(out: OutputBuffer, software: Optional['Software'], client_audit: bool, any_problems: bool, is_json_output: bool, additional_notes: List[str]) -> None:
     with out:
         # Tell user that PuTTY cannot be hardened at the protocol-level.
         if client_audit and (software is not None) and (software.product == Product.PuTTY):
@@ -441,17 +341,102 @@ def output_info(out: OutputBuffer, software: Optional['Software'], client_audit:
         if any_problems:
             out.warn('(nfo) For hardening guides on common OSes, please see: <https://www.ssh-audit.com/hardening_guides.html>')
 
+        # Add any additional notes.
+        for additional_note in additional_notes:
+            if len(additional_note) > 0:
+                out.warn("(nfo) %s" % additional_note)
+
     if not out.is_section_empty() and not is_json_output:
         out.head('# additional info')
         out.flush_section()
         out.sep()
 
 
-def post_process_findings(banner: Optional[Banner], algs: Algorithms) -> List[str]:
-    '''Perform post-processing on scan results before reporting them to the user.  Returns a list of algorithms that should not be recommended'''
+def post_process_findings(banner: Optional[Banner], algs: Algorithms, client_audit: bool, dh_rate_test_notes: str) -> Tuple[List[str], List[str]]:
+    '''Perform post-processing on scan results before reporting them to the user.  Returns a list of algorithms that should not be recommended and a list of notes.'''
+
+    def _add_terrapin_warning(db: Dict[str, Dict[str, List[List[Optional[str]]]]], category: str, algorithm_name: str) -> None:
+        '''Adds a warning regarding the Terrapin vulnerability for the specified algorithm.'''
+        # Ensure that a slot for warnings exists for this algorithm.
+        while len(db[category][algorithm_name]) < 3:
+            db[category][algorithm_name].append([])
+
+        db[category][algorithm_name][2].append("vulnerable to the Terrapin attack (CVE-2023-48795), allowing message prefix truncation")
+
+    def _get_chacha_ciphers_enabled(algs: Algorithms) -> List[str]:
+        '''Returns a list of chacha20-poly1305 ciphers that the peer supports.'''
+        ret = []
+
+        if algs.ssh2kex is not None:
+            ciphers_supported = algs.ssh2kex.client.encryption if client_audit else algs.ssh2kex.server.encryption
+            for cipher in ciphers_supported:
+                if cipher.startswith("chacha20-poly1305"):
+                    ret.append(cipher)
+
+        return ret
+
+    def _get_chacha_ciphers_not_enabled(db: Dict[str, Dict[str, List[List[Optional[str]]]]], algs: Algorithms) -> List[str]:
+        '''Returns a list of all chacha20-poly1305 in our algorithm database.'''
+        ret = []
+
+        for cipher in db["enc"]:
+            if cipher.startswith("chacha20-poly1305") and cipher not in _get_chacha_ciphers_enabled(algs):
+                ret.append(cipher)
+
+        return ret
+
+    def _get_cbc_ciphers_enabled(algs: Algorithms) -> List[str]:
+        '''Returns a list of CBC ciphers that the peer supports.'''
+        ret = []
+
+        if algs.ssh2kex is not None:
+            ciphers_supported = algs.ssh2kex.client.encryption if client_audit else algs.ssh2kex.server.encryption
+            for cipher in ciphers_supported:
+                if cipher.endswith("-cbc") or cipher.endswith("-cbc@openssh.org") or cipher.endswith("-cbc@ssh.com") or cipher == "rijndael-cbc@lysator.liu.se":
+                    ret.append(cipher)
+
+        return ret
+
+    def _get_cbc_ciphers_not_enabled(db: Dict[str, Dict[str, List[List[Optional[str]]]]], algs: Algorithms) -> List[str]:
+        '''Returns a list of all CBC ciphers in our algorithm database.'''
+        ret = []
+
+        for cipher in db["enc"]:
+            if (cipher.endswith("-cbc") or cipher.endswith("-cbc@openssh.org") or cipher.endswith("-cbc@ssh.com") or cipher == "rijndael-cbc@lysator.liu.se") and cipher not in _get_cbc_ciphers_enabled(algs):
+                ret.append(cipher)
+
+        return ret
+
+    def _get_etm_macs_enabled(algs: Algorithms) -> List[str]:
+        '''Returns a list of ETM MACs that the peer supports.'''
+        ret = []
+
+        if algs.ssh2kex is not None:
+            macs_supported = algs.ssh2kex.client.mac if client_audit else algs.ssh2kex.server.mac
+            for mac in macs_supported:
+                if mac.endswith("-etm@openssh.com"):
+                    ret.append(mac)
+
+        return ret
+
+    def _get_etm_macs_not_enabled(db: Dict[str, Dict[str, List[List[Optional[str]]]]], algs: Algorithms) -> List[str]:
+        '''Returns a list of ETM MACs in our algorithm database.'''
+        ret = []
+
+        for mac in db["mac"]:
+            if mac.endswith("-etm@openssh.com") and mac not in _get_etm_macs_enabled(algs):
+                ret.append(mac)
+
+        return ret
 
 
     algorithm_recommendation_suppress_list = []
+    algs_to_note = []
+
+
+    #
+    # Post-processing of the OpenSSH diffie-hellman-group-exchange-sha256 fallback mechanism bug/feature.
+    #
 
     # If the server is OpenSSH, and the diffie-hellman-group-exchange-sha256 key exchange was found with modulus size 2048, add a note regarding the bug that causes the server to support 2048-bit moduli no matter the configuration.
     if (algs.ssh2kex is not None and 'diffie-hellman-group-exchange-sha256' in algs.ssh2kex.kex_algorithms and 'diffie-hellman-group-exchange-sha256' in algs.ssh2kex.dh_modulus_sizes() and algs.ssh2kex.dh_modulus_sizes()['diffie-hellman-group-exchange-sha256'] == 2048) and (banner is not None and banner.software is not None and banner.software.find('OpenSSH') != -1):
@@ -466,11 +451,65 @@ def post_process_findings(banner: Optional[Banner], algs: Algorithms) -> List[st
         # Ensure that this algorithm doesn't appear in the recommendations section since the user cannot control this OpenSSH bug.
         algorithm_recommendation_suppress_list.append('diffie-hellman-group-exchange-sha256')
 
-    return algorithm_recommendation_suppress_list
+    # Check for the Terrapin vulnerability (CVE-2023-48795), and mark the vulnerable algorithms.
+    kex_strict_marker = False
+    if algs.ssh2kex is not None and \
+       ((client_audit and 'kex-strict-c-v00@openssh.com' in algs.ssh2kex.kex_algorithms) or (not client_audit and 'kex-strict-s-v00@openssh.com' in algs.ssh2kex.kex_algorithms)):  # Strict KEX marker is present.
+        kex_strict_marker = True
+
+    db = SSH2_KexDB.get_db()
+
+
+    #
+    # Post-processing of algorithms related to the Terrapin vulnerability (CVE-2023-48795).
+    #
+
+    # Without the strict KEX marker, the chacha20-poly1305 ciphers are always vulnerable.
+    for chacha_cipher in _get_chacha_ciphers_enabled(algs):
+        if kex_strict_marker:
+            # Inform the user that the target is correctly configured, but another peer may still choose this algorithm without using strict KEX negotiation, which would still result in vulnerability.
+            algs_to_note.append(chacha_cipher)
+        else:
+            _add_terrapin_warning(db, "enc", chacha_cipher)
+
+    cbc_ciphers_enabled = _get_cbc_ciphers_enabled(algs)
+    etm_macs_enabled = _get_etm_macs_enabled(algs)
+
+    # Without the strict KEX marker, if at least one CBC cipher and at least one ETM MAC is supported, mark them all as vulnerable.
+    if len(cbc_ciphers_enabled) > 0 and len(etm_macs_enabled) > 0:
+        for cipher in cbc_ciphers_enabled:
+            if kex_strict_marker:
+                # Inform the user that the target is correctly configured, but another peer may still choose this algorithm without using strict KEX negotiation, which would still result in vulnerability.
+                algs_to_note.append(cipher)
+            else:
+                _add_terrapin_warning(db, "enc", cipher)
+
+        for mac in etm_macs_enabled:
+            if kex_strict_marker:
+                # Inform the user that the target is correctly configured, but another peer may still choose this algorithm without using strict KEX negotiation, which would still result in vulnerability.
+                algs_to_note.append(mac)
+            else:
+                _add_terrapin_warning(db, "mac", mac)
+
+    # Return a note telling the user that, while this target is properly configured, if connected to a vulnerable peer, then a vulnerable connection is still possible.
+    additional_notes = []
+    if len(algs_to_note) > 0:
+        additional_notes.append("Be aware that, while this target properly supports the strict key exchange method (via the kex-strict-?-v00@openssh.com marker) needed to protect against the Terrapin vulnerability (CVE-2023-48795), all peers must also support this feature as well, otherwise the vulnerability will still be present.  The following algorithms would allow an unpatched peer to create vulnerable SSH channels with this target: %s.  If any CBC ciphers are in this list, you may remove them while leaving the *-etm@openssh.com MACs in place; these MACs are fine while paired with non-CBC cipher types." % ", ".join(algs_to_note))
+
+    # Add the chacha ciphers, CBC ciphers, and ETM MACs to the recommendation suppression list if they are not enabled on the server.  That way they are not recommended to the user to enable if they were explicitly disabled to handle the Terrapin vulnerability.  However, they can still be recommended for disabling.
+    algorithm_recommendation_suppress_list += _get_chacha_ciphers_not_enabled(db, algs)
+    algorithm_recommendation_suppress_list += _get_cbc_ciphers_not_enabled(db, algs)
+    algorithm_recommendation_suppress_list += _get_etm_macs_not_enabled(db, algs)
+
+    # Append any notes related to the DH rate test.
+    if len(dh_rate_test_notes) > 0:
+        additional_notes.append(dh_rate_test_notes)
+
+    return algorithm_recommendation_suppress_list, additional_notes
 
 
 # Returns a exitcodes.* flag to denote if any failures or warnings were encountered.
-def output(out: OutputBuffer, aconf: AuditConf, banner: Optional[Banner], header: List[str], client_host: Optional[str] = None, kex: Optional[SSH2_Kex] = None, pkm: Optional[SSH1_PublicKeyMessage] = None, print_target: bool = False) -> int:
+def output(out: OutputBuffer, aconf: AuditConf, banner: Optional[Banner], header: List[str], client_host: Optional[str] = None, kex: Optional[SSH2_Kex] = None, pkm: Optional[SSH1_PublicKeyMessage] = None, print_target: bool = False, dh_rate_test_notes: str = "") -> int:
 
     program_retval = exitcodes.GOOD
     client_audit = client_host is not None  # If set, this is a client audit.
@@ -478,7 +517,7 @@ def output(out: OutputBuffer, aconf: AuditConf, banner: Optional[Banner], header
     algs = Algorithms(pkm, kex)
 
     # Perform post-processing on the findings to make final adjustments before outputting the results.
-    algorithm_recommendation_suppress_list = post_process_findings(banner, algs)
+    algorithm_recommendation_suppress_list, additional_notes = post_process_findings(banner, algs, client_audit, dh_rate_test_notes)
 
     with out:
         if print_target:
@@ -493,9 +532,9 @@ def output(out: OutputBuffer, aconf: AuditConf, banner: Optional[Banner], header
                 else:
                     host = '%s:%d' % (aconf.host, aconf.port)
 
-            out.good('(gen) target: {}'. format(host))
+            out.good('(gen) target: {}'. format(host), always_print=True)
         if client_audit:
-            out.good('(gen) client IP: {}'.format(client_host))
+            out.good('(gen) client IP: {}'.format(client_host), always_print=True)
         if len(header) > 0:
             out.info('(gen) header: ' + '\n'.join(header))
         if banner is not None:
@@ -528,7 +567,7 @@ def output(out: OutputBuffer, aconf: AuditConf, banner: Optional[Banner], header
         out.flush_section()
         out.sep()
     maxlen = algs.maxlen + 1
-    cves = output_security(out, banner, client_audit, maxlen, aconf.json)
+    output_security(out, banner, maxlen, aconf.json)
     # Filled in by output_algorithms() with unidentified algs.
     unknown_algorithms: List[str] = []
 
@@ -558,14 +597,14 @@ def output(out: OutputBuffer, aconf: AuditConf, banner: Optional[Banner], header
 
     output_fingerprints(out, algs, aconf.json)
     perfect_config = output_recommendations(out, algs, algorithm_recommendation_suppress_list, software, aconf.json, maxlen)
-    output_info(out, software, client_audit, not perfect_config, aconf.json)
+    output_info(out, software, client_audit, not perfect_config, aconf.json, additional_notes)
 
     if aconf.json:
         out.reset()
         # Build & write the JSON struct.
-        out.info(json.dumps(build_struct(aconf.host + ":" + str(aconf.port), banner, cves, kex=kex, client_host=client_host, software=software, algorithms=algs, algorithm_recommendation_suppress_list=algorithm_recommendation_suppress_list), indent=4 if aconf.json_print_indent else None, sort_keys=True))
+        out.info(json.dumps(build_struct(aconf.host + ":" + str(aconf.port), banner, kex=kex, client_host=client_host, software=software, algorithms=algs, algorithm_recommendation_suppress_list=algorithm_recommendation_suppress_list, additional_notes=additional_notes), indent=4 if aconf.json_print_indent else None, sort_keys=True))
     elif len(unknown_algorithms) > 0:  # If we encountered any unknown algorithms, ask the user to report them.
-        out.warn("\n\n!!! WARNING: unknown algorithm(s) found!: %s.  Please email the full output above to the maintainer (jtesta@positronsecurity.com), or create a Github issue at <https://github.com/jtesta/ssh-audit/issues>.\n" % ','.join(unknown_algorithms))
+        out.warn("\n\n!!! WARNING: unknown algorithm(s) found!: %s.  If this is the latest version of ssh-audit (see <https://github.com/jtesta/ssh-audit/releases>), please create a new Github issue at <https://github.com/jtesta/ssh-audit/issues> with the full output above.\n" % ','.join(unknown_algorithms))
 
     return program_retval
 
@@ -577,7 +616,12 @@ def evaluate_policy(out: OutputBuffer, aconf: AuditConf, banner: Optional['Banne
 
     passed, error_struct, error_str = aconf.policy.evaluate(banner, kex)
     if aconf.json:
-        json_struct = {'host': aconf.host, 'policy': aconf.policy.get_name_and_version(), 'passed': passed, 'errors': error_struct}
+        warnings: List[str] = []
+        if aconf.policy.is_outdated_builtin_policy():
+            warnings.append("A newer version of this built-in policy is available.")
+
+        json_struct = {'host': aconf.host, 'port': aconf.port, 'policy': aconf.policy.get_name_and_version(), 'passed': passed, 'errors': error_struct, 'warnings': warnings}
+
         out.info(json.dumps(json_struct, indent=4 if aconf.json_print_indent else None, sort_keys=True))
     else:
         spacing = ''
@@ -609,6 +653,10 @@ def evaluate_policy(out: OutputBuffer, aconf: AuditConf, banner: Optional['Banne
         else:
             out.fail("%sFailed!" % icon_fail)
             out.warn("\nErrors:\n%s" % error_str)
+
+        # If the user selected an out-dated built-in policy then issue a warning.
+        if aconf.policy.is_outdated_builtin_policy():
+            out.warn("Note: A newer version of this built-in policy is available.  Use the -L option to view all available versions.")
 
     return passed
 
@@ -662,24 +710,27 @@ def get_algorithm_recommendations(algs: Optional[Algorithms], algorithm_recommen
     return ret
 
 
-def list_policies(out: OutputBuffer) -> None:
+def list_policies(out: OutputBuffer, verbose: bool) -> None:
     '''Prints a list of server & client policies.'''
 
-    server_policy_names, client_policy_names = Policy.list_builtin_policies()
+    server_policy_names, client_policy_names = Policy.list_builtin_policies(verbose)
 
     if len(server_policy_names) > 0:
         out.head('\nServer policies:\n')
-        out.info("  * \"%s\"" % "\"\n  * \"".join(server_policy_names))
+        out.info("  * %s" % "\n  * ".join(server_policy_names))
 
     if len(client_policy_names) > 0:
         out.head('\nClient policies:\n')
-        out.info("  * \"%s\"" % "\"\n  * \"".join(client_policy_names))
+        out.info("  * %s" % "\n  * ".join(client_policy_names))
 
     out.sep()
     if len(server_policy_names) == 0 and len(client_policy_names) == 0:
         out.fail("Error: no built-in policies found!")
     else:
         out.info("\nHint: Use -P and provide the full name of a policy to run a policy scan with.\n")
+        out.info("Hint: Use -L -v to see the change log for each policy, as well as previous versions.\n")
+        out.info("Note: the general OpenSSH policies apply to the official releases only. OS distributions may back-port changes that cause failures (for example, Debian 11 back-ported the strict KEX mode into their package of OpenSSH v8.4, whereas it was only officially added to OpenSSH v9.6 and later).  In these cases, consider creating a custom policy (-M option).\n")
+        out.info("Note: instructions for hardening targets, which correspond to the above policies, can be found at: <https://ssh-audit.com/hardening_guides.html>\n")
     out.write()
 
 
@@ -718,90 +769,105 @@ def make_policy(aconf: AuditConf, banner: Optional['Banner'], kex: Optional['SSH
         print(err)
 
 
-def process_commandline(out: OutputBuffer, args: List[str], usage_cb: Callable[..., None]) -> 'AuditConf':  # pylint: disable=too-many-statements
+def process_commandline(out: OutputBuffer, args: List[str]) -> 'AuditConf':  # pylint: disable=too-many-statements
     # pylint: disable=too-many-branches
     aconf = AuditConf()
 
     enable_colors = not any(i in args for i in ['--no-colors', '-n'])
+
+    # Disable colors if the NO_COLOR environment variable is set.
+    if "NO_COLOR" in os.environ:
+        enable_colors = False
+
     aconf.colors = enable_colors
     out.use_colors = enable_colors
 
-    try:
-        sopts = 'h1246M:p:P:jbcnvl:t:T:Lmdg:'
-        lopts = ['help', 'ssh1', 'ssh2', 'ipv4', 'ipv6', 'make-policy=', 'port=', 'policy=', 'json', 'batch', 'client-audit', 'no-colors', 'verbose', 'level=', 'timeout=', 'targets=', 'list-policies', 'lookup=', 'threads=', 'manual', 'debug', 'gex-test=']
-        opts, args = getopt.gnu_getopt(args, sopts, lopts)
-    except getopt.GetoptError as err:
-        usage_cb(out, str(err))
     aconf.ssh1, aconf.ssh2 = False, False
     host: str = ''
-    oport: Optional[str] = None
-    port: int = 0
-    for o, a in opts:
-        if o in ('-h', '--help'):
-            usage_cb(out)
-        elif o in ('-1', '--ssh1'):
-            aconf.ssh1 = True
-        elif o in ('-2', '--ssh2'):
-            aconf.ssh2 = True
-        elif o in ('-4', '--ipv4'):
-            aconf.ipv4 = True
-        elif o in ('-6', '--ipv6'):
-            aconf.ipv6 = True
-        elif o in ('-p', '--port'):
-            oport = a
-        elif o in ('-b', '--batch'):
-            aconf.batch = True
-            aconf.verbose = True
-        elif o in ('-c', '--client-audit'):
-            aconf.client_audit = True
-        elif o in ('-j', '--json'):
-            if aconf.json:  # If specified twice, enable indent printing.
-                aconf.json_print_indent = True
-            else:
-                aconf.json = True
-        elif o in ('-v', '--verbose'):
-            aconf.verbose = True
-            out.verbose = True
-        elif o in ('-l', '--level'):
-            if a not in ('info', 'warn', 'fail'):
-                usage_cb(out, 'level {} is not valid'.format(a))
-            aconf.level = a
-        elif o in ('-t', '--timeout'):
-            aconf.timeout = float(a)
-            aconf.timeout_set = True
-        elif o in ('-M', '--make-policy'):
-            aconf.make_policy = True
-            aconf.policy_file = a
-        elif o in ('-P', '--policy'):
-            aconf.policy_file = a
-        elif o in ('-T', '--targets'):
-            aconf.target_file = a
+    port: int = 22
 
-            # If we're on Windows, and we can't use the idna workaround, force only one thread to be used (otherwise a crash would occur).
-            # if no_idna_workaround:
-            #    print("\nWARNING: the idna module was not found on this system, thus only single-threaded scanning will be done (this is a workaround for this Windows-specific crash: https://github.com/python/cpython/issues/73474).  Multi-threaded scanning can be enabled by installing the idna module (pip install idna).\n")
-            #    aconf.threads = 1
-        elif o == '--threads':
-            aconf.threads = int(a)
-            # if no_idna_workaround:
-            #    aconf.threads = 1
-        elif o in ('-L', '--list-policies'):
-            aconf.list_policies = True
-        elif o == '--lookup':
-            aconf.lookup = a
-        elif o in ('-m', '--manual'):
-            aconf.manual = True
-        elif o in ('-d', '--debug'):
+    parser = argparse.ArgumentParser(description="# {} {}, https://github.com/jtesta/ssh-audit".format(os.path.basename(sys.argv[0]), VERSION), allow_abbrev=False)
+
+    # Add short options to the parser
+    parser.add_argument("-1", "--ssh1", action="store_true", dest="ssh1", default=False, help="force ssh version 1 only")
+    parser.add_argument("-2", "--ssh2", action="store_true", dest="ssh2", default=False, help="force ssh version 2 only")
+    parser.add_argument("-4", "--ipv4", action="store_true", dest="ipv4", default=False, help="enable IPv4 (order of precedence)")
+    parser.add_argument("-6", "--ipv6", action="store_true", dest="ipv6", default=False, help="enable IPv6 (order of precedence)")
+    parser.add_argument("-b", "--batch", action="store_true", dest="batch", default=False, help="batch output")
+    parser.add_argument("-c", "--client-audit", action="store_true", dest="client_audit", default=False, help="starts a server on port 2222 to audit client software config (use -p to change port; use -t to change timeout)")
+    parser.add_argument("-d", "--debug", action="store_true", dest="debug", default=False, help="enable debugging output")
+    parser.add_argument("-g", "--gex-test", action="store", dest="gex_test", metavar="<min1:pref1:max1[,min2:pref2:max2,...]> / <x-y[:step]>", type=str, default=None, help="conducts a very customized Diffie-Hellman GEX modulus size test. Tests an array of minimum, preferred, and maximum values, or a range of values with an optional incremental step amount")
+    parser.add_argument("-j", "--json", action="count", dest="json", default=0, help="enable JSON output (use -jj to enable indentation for better readability)")
+    parser.add_argument("-l", "--level", action="store", dest="level", type=str, choices=["info", "warn", "fail"], default="info", help="minimum output level (default: %(default)s)")
+    parser.add_argument("-L", "--list-policies", action="store_true", dest="list_policies", default=False, help="list all the official, built-in policies. Combine with -v to view policy change logs")
+    parser.add_argument("-M", "--make-policy", action="store", dest="make_policy", metavar="custom_policy.txt", type=str, default=None, help="creates a policy based on the target server (i.e.: the target server has the ideal configuration that other servers should adhere to), and stores it in the file path specified")
+    parser.add_argument("-m", "--manual", action="store_true", dest="manual", default=False, help="print the man page (Docker, PyPI, Snap, and Windows builds only)")
+    parser.add_argument("-n", "--no-colors", action="store_true", dest="no_colors", default=False, help="disable colors (automatic when the NO_COLOR environment variable is set)")
+    parser.add_argument("-P", "--policy", action="store", dest="policy", metavar="\"Built-In Policy Name\" / custom_policy.txt", type=str, default=None, help="run a policy test using the specified policy (use -L to see built-in policies, or specify filesystem path to custom policy created by -M)")
+    parser.add_argument("-p", "--port", action="store", dest="oport", metavar="N", type=int, default=None, help="the TCP port to connect to (or to listen on when -c is used)")
+    parser.add_argument("-T", "--targets", action="store", dest="targets", metavar="targets.txt", type=str, default=None, help="a file containing a list of target hosts (one per line, format HOST[:PORT]). Use -p/--port to set the default port for all hosts.  Use --threads to control concurrent scans")
+    parser.add_argument("-t", "--timeout", action="store", dest="timeout", metavar="N", type=int, default=5, help="timeout (in seconds) for connection and reading (default: %(default)s)")
+    parser.add_argument("-v", "--verbose", action="store_true", dest="verbose", default=False, help="enable verbose output")
+
+    # Add long options to the parser
+    parser.add_argument("--conn-rate-test", action="store", dest="conn_rate_test", metavar="N[:max_rate]", type=str, default=None, help="perform a connection rate test (useful for collecting metrics related to susceptibility of the DHEat vuln). Testing is conducted with N concurrent sockets with an optional maximum rate of connections per second")
+    parser.add_argument("--dheat", action="store", dest="dheat", metavar="N[:kex[:e_len]]", type=str, default=None, help="continuously perform the DHEat DoS attack (CVE-2002-20001) against the target using N concurrent sockets.  Optionally, a specific key exchange algorithm can be specified instead of allowing it to be automatically chosen.  Additionally, a small length of the fake e value sent to the server can be chosen for a more efficient attack (such as 4).")
+    parser.add_argument("--lookup", action="store", dest="lookup", metavar="alg1[,alg2,...]", type=str, default=None, help="looks up an algorithm(s) without connecting to a server.")
+    parser.add_argument("--skip-rate-test", action="store_true", dest="skip_rate_test", default=False, help="skip the connection rate test during standard audits (used to safely infer whether the DHEat attack is viable)")
+    parser.add_argument("--threads", action="store", dest="threads", metavar="N", type=int, default=32, help="number of threads to use when scanning multiple targets (-T/--targets) (default: %(default)s)")
+
+    # The mandatory target option.  Or rather, mandatory when -L, -T, or --lookup are not used.
+    parser.add_argument("host", nargs="?", action="store", type=str, default="", help="target hostname or IPv4/IPv6 address")
+
+    # If no arguments were given, print the help and exit.
+    if len(args) < 1:
+        parser.print_help()
+        sys.exit(exitcodes.UNKNOWN_ERROR)
+
+    oport: Optional[int] = None
+    try:
+        argument = parser.parse_args(args=args)
+
+        # Set simple flags.
+        aconf.client_audit = argument.client_audit
+        aconf.ipv4 = argument.ipv4
+        aconf.ipv6 = argument.ipv6
+        aconf.level = argument.level
+        aconf.list_policies = argument.list_policies
+        aconf.manual = argument.manual
+        aconf.skip_rate_test = argument.skip_rate_test
+        aconf.ssh1 = argument.ssh1
+        aconf.ssh2 = argument.ssh2
+        oport = argument.oport
+
+        if argument.batch is True:
+            aconf.batch = True
+
+        # If one -j was given, turn on JSON output.  If -jj was given, enable indentation.
+        aconf.json = argument.json > 0
+        if argument.json > 1:
+            aconf.json_print_indent = True
+
+        if argument.conn_rate_test is not None:
+            aconf.conn_rate_test = argument.conn_rate_test
+
+        if argument.debug is True:
             aconf.debug = True
             out.debug = True
-        elif o in ('-g', '--gex-test'):
+
+        if argument.dheat is not None:
+            aconf.dheat = argument.dheat
+
+        if argument.gex_test is not None:
+            dh_gex = argument.gex_test
             permitted_syntax = get_permitted_syntax_for_gex_test()
 
-            if not any(re.search(regex_str, a) for regex_str in permitted_syntax.values()):
-                usage_cb(out, '{} {} is not valid'.format(o, a))
+            if not any(re.search(regex_str, dh_gex) for regex_str in permitted_syntax.values()):
+                out.fail('{} is not valid'.format(dh_gex), write_now=True)
+                sys.exit(exitcodes.UNKNOWN_ERROR)
 
-            if re.search(permitted_syntax['RANGE'], a):
-                extracted_digits = re.findall(r'\d+', a)
+            if re.search(permitted_syntax['RANGE'], dh_gex):
+                extracted_digits = re.findall(r'\d+', dh_gex)
                 bits_left_bound = int(extracted_digits[0])
                 bits_right_bound = int(extracted_digits[1])
 
@@ -810,48 +876,80 @@ def process_commandline(out: OutputBuffer, args: List[str], usage_cb: Callable[.
                     bits_step = int(extracted_digits[2])
 
                 if bits_step <= 0:
-                    usage_cb(out, '{} {} is not valid'.format(o, bits_step))
+                    out.fail('the step field cannot be 0 or less: {}'.format(bits_step), write_now=True)
+                    sys.exit(exitcodes.UNKNOWN_ERROR)
 
                 if all(x < 0 for x in (bits_left_bound, bits_right_bound)):
-                    usage_cb(out, '{} {} {} is not valid'.format(o, bits_left_bound, bits_right_bound))
+                    out.fail('{} {} {} is not valid'.format(dh_gex, bits_left_bound, bits_right_bound), write_now=True)
+                    sys.exit(exitcodes.UNKNOWN_ERROR)
 
-            aconf.gex_test = a
+            aconf.gex_test = dh_gex
 
+        if argument.lookup is not None:
+            aconf.lookup = argument.lookup
 
-    if len(args) == 0 and aconf.client_audit is False and aconf.target_file is None and aconf.list_policies is False and aconf.lookup == '' and aconf.manual is False:
-        usage_cb(out)
+        if argument.make_policy is not None:
+            aconf.make_policy = True
+            aconf.policy_file = argument.make_policy
+
+        if argument.policy is not None:
+            aconf.policy_file = argument.policy
+
+        if argument.targets is not None:
+            aconf.target_file = argument.targets
+
+        if argument.threads is not None:
+            aconf.threads = argument.threads
+
+        if argument.timeout is not None:
+            aconf.timeout = float(argument.timeout)
+            aconf.timeout_set = True
+
+        if argument.verbose is True:
+            aconf.verbose = True
+            out.verbose = True
+
+    except argparse.ArgumentError as err:
+        out.fail(str(err), write_now=True)
+        parser.print_help()
+        sys.exit(exitcodes.UNKNOWN_ERROR)
+
+    if argument.host == "" and argument.client_audit is False and argument.targets is None and argument.list_policies is False and argument.lookup is None and argument.manual is False:
+        out.fail("target host must be specified, unless -c, -m, -L, -T, or --lookup are used", write_now=True)
+        sys.exit(exitcodes.UNKNOWN_ERROR)
 
     if aconf.manual:
         return aconf
 
-    if aconf.lookup != '':
+    if aconf.lookup != "":
         return aconf
 
     if aconf.list_policies:
-        list_policies(out)
+        list_policies(out, aconf.verbose)
         sys.exit(exitcodes.GOOD)
 
     if aconf.client_audit is False and aconf.target_file is None:
         if oport is not None:
-            host = args[0]
+            host = argument.host
         else:
-            host, port = Utils.parse_host_and_port(args[0])
-        if not host and aconf.target_file is None:
-            usage_cb(out, 'host is empty')
+            host, port = Utils.parse_host_and_port(argument.host)
 
-    if port == 0 and oport is None:
-        if aconf.client_audit:  # The default port to listen on during a client audit is 2222.
-            port = 2222
-        else:
-            port = 22
+        if not host and aconf.target_file is None:
+            out.fail("target host is not specified", write_now=True)
+            sys.exit(exitcodes.UNKNOWN_ERROR)
+
+    if oport is None and aconf.client_audit:  # The default port to listen on during a client audit is 2222.
+        port = 2222
 
     if oport is not None:
         port = Utils.parse_int(oport)
-        if port <= 0 or port > 65535:
-            usage_cb(out, 'port {} is not valid'.format(oport))
+        if port < 1 or port > 65535:
+            out.fail("port must be greater than 0 and less than 65535: {}".format(oport), write_now=True)
+            sys.exit(exitcodes.UNKNOWN_ERROR)
 
     aconf.host = host
     aconf.port = port
+
     if not (aconf.ssh1 or aconf.ssh2):
         aconf.ssh1, aconf.ssh2 = True, True
 
@@ -880,26 +978,23 @@ def process_commandline(out: OutputBuffer, args: List[str], usage_cb: Callable[.
             try:
                 aconf.policy = Policy(policy_file=aconf.policy_file, json_output=aconf.json)
             except Exception as e:
-                out.fail("Error while loading policy file: %s: %s" % (str(e), traceback.format_exc()))
-                out.write()
+                out.fail("Error while loading policy file: %s: %s" % (str(e), traceback.format_exc()), write_now=True)
                 sys.exit(exitcodes.UNKNOWN_ERROR)
 
         # If the user wants to do a client audit, but provided a server policy, terminate.
         if aconf.client_audit and aconf.policy.is_server_policy():
-            out.fail("Error: client audit selected, but server policy provided.")
-            out.write()
+            out.fail("Error: client audit selected, but server policy provided.", write_now=True)
             sys.exit(exitcodes.UNKNOWN_ERROR)
 
         # If the user wants to do a server audit, but provided a client policy, terminate.
         if aconf.client_audit is False and aconf.policy.is_server_policy() is False:
-            out.fail("Error: server audit selected, but client policy provided.")
-            out.write()
+            out.fail("Error: server audit selected, but client policy provided.", write_now=True)
             sys.exit(exitcodes.UNKNOWN_ERROR)
 
     return aconf
 
 
-def build_struct(target_host: str, banner: Optional['Banner'], cves: List[Dict[str, Union[str, float]]], kex: Optional['SSH2_Kex'] = None, pkm: Optional['SSH1_PublicKeyMessage'] = None, client_host: Optional[str] = None, software: Optional[Software] = None, algorithms: Optional[Algorithms] = None, algorithm_recommendation_suppress_list: Optional[List[str]] = None) -> Any:  # pylint: disable=too-many-arguments
+def build_struct(target_host: str, banner: Optional['Banner'], kex: Optional['SSH2_Kex'] = None, pkm: Optional['SSH1_PublicKeyMessage'] = None, client_host: Optional[str] = None, software: Optional[Software] = None, algorithms: Optional[Algorithms] = None, algorithm_recommendation_suppress_list: Optional[List[str]] = None, additional_notes: List[str] = []) -> Any:  # pylint: disable=dangerous-default-value
 
     def fetch_notes(algorithm: str, alg_type: str) -> Dict[str, List[Optional[str]]]:
         '''Returns a dictionary containing the messages in the "fail", "warn", and "info" levels for this algorithm.'''
@@ -1061,11 +1156,14 @@ def build_struct(target_host: str, banner: Optional['Banner'], cves: List[Dict[s
             'fp': pkm_fp,
         }]
 
-    # Add in the CVE information.
-    res['cves'] = cves
+    # Historically, CVE information was returned.  Now we'll just return an empty dictionary so as to not break any legacy clients.
+    res['cves'] = []
 
     # Add in the recommendations.
     res['recommendations'] = get_algorithm_recommendations(algorithms, algorithm_recommendation_suppress_list, software, for_server=True)
+
+    # Add in the additional notes.
+    res['additional_notes'] = additional_notes
 
     return res
 
@@ -1143,10 +1241,19 @@ def audit(out: OutputBuffer, aconf: AuditConf, sshv: Optional[int] = None, print
     elif sshv == 2:
         try:
             kex = SSH2_Kex.parse(out, payload)
+            out.d(str(kex))
         except Exception:
             out.fail("Failed to parse server's kex.  Stack trace:\n%s" % str(traceback.format_exc()))
             return exitcodes.CONNECTION_ERROR
 
+        if aconf.dheat is not None:
+            DHEat(out, aconf, banner, kex).run()
+            return exitcodes.GOOD
+        elif aconf.conn_rate_test_enabled:
+            DHEat.dh_rate_test(out, aconf, kex, 0, 0, 0)
+            return exitcodes.GOOD
+
+        dh_rate_test_notes = ""
         if aconf.client_audit is False:
             HostKeyTest.run(out, s, kex)
             if aconf.gex_test != '':
@@ -1154,9 +1261,16 @@ def audit(out: OutputBuffer, aconf: AuditConf, sshv: Optional[int] = None, print
             else:
                 GEXTest.run(out, s, banner, kex)
 
+                # Skip the rate test if the user specified "--skip-rate-test".
+                if aconf.skip_rate_test:
+                    out.d("Skipping rate test due to --skip-rate-test option.")
+                else:
+                    # Try to open many TCP connections against the server if any Diffie-Hellman key exchanges are present; this tests potential vulnerability to the DHEat DOS attack.  Use 3 concurrent sockets over at most 1.5 seconds to open at most 38 connections (stops if 1.5 seconds elapse, or 38 connections are opened--whichever comes first).  If more than 25 connections per second were observed, flag the DH algorithms with a warning about the DHEat DOS vuln.
+                    dh_rate_test_notes = DHEat.dh_rate_test(out, aconf, kex, 1.5, 38, 3)
+
         # This is a standard audit scan.
         if (aconf.policy is None) and (aconf.make_policy is False):
-            program_retval = output(out, aconf, banner, header, client_host=s.client_host, kex=kex, print_target=print_target)
+            program_retval = output(out, aconf, banner, header, client_host=s.client_host, kex=kex, print_target=print_target, dh_rate_test_notes=dh_rate_test_notes)
 
         # This is a policy test.
         elif (aconf.policy is not None) and (aconf.make_policy is False):
@@ -1272,23 +1386,21 @@ def target_worker_thread(host: str, port: int, shared_aconf: AuditConf) -> Tuple
     return ret, string_output
 
 
-def windows_manual(out: OutputBuffer) -> int:
-    '''Prints the man page on Windows.  Returns an exitcodes.* flag.'''
+def builtin_manual(out: OutputBuffer) -> int:
+    '''Prints the man page (Docker, PyPI, Snap, and Windows builds only).  Returns an exitcodes.* flag.'''
 
-    retval = exitcodes.GOOD
 
-    if sys.platform != 'win32':
-        out.fail("The '-m' and '--manual' parameters are reserved for use on Windows only.\nUsers of other operating systems should read the man page.")
-        retval = exitcodes.FAILURE
-        return retval
+    builtin_man_page = BUILTIN_MAN_PAGE
+    if builtin_man_page == "":
+        out.fail("The '-m' and '--manual' parameters are reserved for use in Docker, PyPI, Snap,\nand Windows builds only.  Users of other platforms should read the system man\npage.")
+        return exitcodes.FAILURE
 
     # If colors are disabled, strip the ANSI color codes from the man page.
-    windows_man_page = WINDOWS_MAN_PAGE
     if not out.use_colors:
-        windows_man_page = re.sub(r'\x1b\[\d+?m', '', windows_man_page)
+        builtin_man_page = re.sub(r'\x1b\[\d+?m', '', builtin_man_page)
 
-    out.info(windows_man_page)
-    return retval
+    out.info(builtin_man_page)
+    return exitcodes.GOOD
 
 
 def get_permitted_syntax_for_gex_test() -> Dict[str, str]:
@@ -1366,7 +1478,7 @@ def run_gex_granular_modulus_size_test(out: OutputBuffer, s: 'SSH_Socket', kex: 
 
 def main() -> int:
     out = OutputBuffer()
-    aconf = process_commandline(out, sys.argv[1:], usage)
+    aconf = process_commandline(out, sys.argv[1:])
 
     # If we're on Windows, but the colorama module could not be imported, print a warning if we're in verbose mode.
     if (sys.platform == 'win32') and ('colorama' not in sys.modules):
@@ -1382,7 +1494,7 @@ def main() -> int:
         # to output a plain text version of the man page.
         if (sys.platform == 'win32') and ('colorama' not in sys.modules):
             out.use_colors = False
-        retval = windows_manual(out)
+        retval = builtin_manual(out)
         out.write()
         sys.exit(retval)
 
@@ -1399,10 +1511,10 @@ def main() -> int:
         if aconf.json:
             print('[', end='')
 
-        # Loop through each target in the list.
+        # Loop through each target in the list.  Entries can specify a port number to use, otherwise the value provided on the command line (--port=N) will be used by default (set to 22 if --port is not used).
         target_servers = []
         for _, target in enumerate(aconf.target_list):
-            host, port = Utils.parse_host_and_port(target, default_port=22)
+            host, port = Utils.parse_host_and_port(target, default_port=aconf.port)
             target_servers.append((host, port))
 
         # A ranked list of return codes.  Those with higher indices will take precedence over lower ones.  For example, if three servers are scanned, yielding WARNING, GOOD, and UNKNOWN_ERROR, the overall result will be UNKNOWN_ERROR, since its index is the highest.  Errors have highest priority, followed by failures, then warnings.
@@ -1447,8 +1559,9 @@ def main() -> int:
 
 
 if __name__ == '__main__':  # pragma: nocover
-    exit_code = exitcodes.GOOD
+    multiprocessing.freeze_support()  # Needed for PyInstaller (Windows) builds.
 
+    exit_code = exitcodes.GOOD
     try:
         exit_code = main()
     except Exception:

@@ -1,9 +1,14 @@
 # ssh-audit
 [![License](https://img.shields.io/badge/license-MIT-brightgreen.svg)](https://github.com/jtesta/ssh-audit/blob/master/LICENSE)
-[![PyPI Downloads](https://img.shields.io/pypi/dm/ssh-audit)](https://pypi.org/project/ssh-audit/)
-[![Docker Pulls](https://img.shields.io/docker/pulls/positronsecurity/ssh-audit)](https://hub.docker.com/r/positronsecurity/ssh-audit)
 [![Build Status](https://github.com/jtesta/ssh-audit/actions/workflows/tox.yaml/badge.svg)](https://github.com/jtesta/ssh-audit/actions)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/jtesta/ssh-audit/blob/master/CONTRIBUTING.md)
+
+[![PyPI Downloads](https://img.shields.io/pypi/dm/ssh-audit?label=pypi%20downloads&color=purple)](https://pypi.org/project/ssh-audit/)
+[![Homebrew Downloads](https://img.shields.io/homebrew/installs/dy/ssh-audit?label=homebrew%20downloads&color=teal)](https://formulae.brew.sh/formula/ssh-audit)
+[![Docker Pulls](https://img.shields.io/docker/pulls/positronsecurity/ssh-audit)](https://hub.docker.com/r/positronsecurity/ssh-audit)
+[![Snap Downloads](https://img.shields.io/badge/snap%20downloads-no%20idea-yellow.svg)](https://snapcraft.io/ssh-audit)
+
+[![Github Sponsors](https://img.shields.io/github/sponsors/jtesta?color=red)](https://github.com/sponsors/jtesta)
 
 **ssh-audit** is a tool for ssh server & client configuration auditing.
 
@@ -25,54 +30,72 @@
 - analyze SSH client configuration;
 - grab banner, recognize device or software and operating system, detect compression;
 - gather key-exchange, host-key, encryption and message authentication code algorithms;
-- output algorithm information (available since, removed/disabled, unsafe/weak/legacy, etc);
+- output algorithm security information (available since, removed/disabled, unsafe/weak/legacy, etc);
 - output algorithm recommendations (append or remove based on recognized software version);
-- output security information (related issues, assigned CVE list, etc);
 - analyze SSH version compatibility based on algorithm information;
 - historical information from OpenSSH, Dropbear SSH and libssh;
 - policy scans to ensure adherence to a hardened/standard configuration;
 - runs on Linux and Windows;
-- supports Python 3.8 - 3.12;
+- supports Python 3.8 - 3.13;
 - no dependencies
 
 ## Usage
 ```
-usage: ssh-audit.py [options] <host>
+usage: ssh-audit.py [-h] [-1] [-2] [-4] [-6] [-b] [-c] [-d]
+                    [-g <min1:pref1:max1[,min2:pref2:max2,...]> / <x-y[:step]>] [-j] [-l {info,warn,fail}] [-L]
+                    [-M custom_policy.txt] [-m] [-n] [-P "Built-In Policy Name" / custom_policy.txt] [-p N]
+                    [-T targets.txt] [-t N] [-v] [--conn-rate-test N[:max_rate]] [--dheat N[:kex[:e_len]]]
+                    [--lookup alg1[,alg2,...]] [--skip-rate-test] [--threads N]
+                    [host]
 
-   -h,  --help             print this help
-   -1,  --ssh1             force ssh version 1 only
-   -2,  --ssh2             force ssh version 2 only
-   -4,  --ipv4             enable IPv4 (order of precedence)
-   -6,  --ipv6             enable IPv6 (order of precedence)
-   -b,  --batch            batch output
-   -c,  --client-audit     starts a server on port 2222 to audit client
-                               software config (use -p to change port;
-                               use -t to change timeout)
-   -d,  --debug            Enable debug output.
-   -g,  --gex-test=<x[,y,...]>  dh gex modulus size test
-                   <min1:pref1:max1[,min2:pref2:max2,...]>
-                   <x-y[:step]>
-   -j,  --json             JSON output (use -jj to enable indents)
-   -l,  --level=<level>    minimum output level (info|warn|fail)
-   -L,  --list-policies    list all the official, built-in policies
-        --lookup=<alg1,alg2,...>    looks up an algorithm(s) without
-                                    connecting to a server
-   -m,  --manual           print the man page (Windows only)
-   -M,  --make-policy=<policy.txt>  creates a policy based on the target server
-                                    (i.e.: the target server has the ideal
-                                    configuration that other servers should
-                                    adhere to)
-   -n,  --no-colors        disable colors
-   -p,  --port=<port>      port to connect
-   -P,  --policy=<"policy name" | policy.txt>  run a policy test using the
-                                                   specified policy
-   -t,  --timeout=<secs>   timeout (in seconds) for connection and reading
-                               (default: 5)
-   -T,  --targets=<hosts.txt>  a file containing a list of target hosts (one
-                                   per line, format HOST[:PORT])
-        --threads=<threads>    number of threads to use when scanning multiple
-                                   targets (-T/--targets) (default: 32)
-   -v,  --verbose          verbose output
+positional arguments:
+  host                  target hostname or IPv4/IPv6 address
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -1, --ssh1            force ssh version 1 only
+  -2, --ssh2            force ssh version 2 only
+  -4, --ipv4            enable IPv4 (order of precedence)
+  -6, --ipv6            enable IPv6 (order of precedence)
+  -b, --batch           batch output
+  -c, --client-audit    starts a server on port 2222 to audit client software config (use -p to change port; use -t
+                        to change timeout)
+  -d, --debug           enable debugging output
+  -g <min1:pref1:max1[,min2:pref2:max2,...]> / <x-y[:step]>, --gex-test <min1:pref1:max1[,min2:pref2:max2,...]> / <x-y[:step]>
+                        conducts a very customized Diffie-Hellman GEX modulus size test. Tests an array of minimum,
+                        preferred, and maximum values, or a range of values with an optional incremental step amount
+  -j, --json            enable JSON output (use -jj to enable indentation for better readability)
+  -l {info,warn,fail}, --level {info,warn,fail}
+                        minimum output level (default: info)
+  -L, --list-policies   list all the official, built-in policies. Combine with -v to view policy change logs
+  -M custom_policy.txt, --make-policy custom_policy.txt
+                        creates a policy based on the target server (i.e.: the target server has the ideal
+                        configuration that other servers should adhere to), and stores it in the file path specified
+  -m, --manual          print the man page (Docker, PyPI, Snap, and Windows builds only)
+  -n, --no-colors       disable colors (automatic when the NO_COLOR environment variable is set)
+  -P "Built-In Policy Name" / custom_policy.txt, --policy "Built-In Policy Name" / custom_policy.txt
+                        run a policy test using the specified policy (use -L to see built-in policies, or specify
+                        filesystem path to custom policy created by -M)
+  -p N, --port N        the TCP port to connect to (or to listen on when -c is used)
+  -T targets.txt, --targets targets.txt
+                        a file containing a list of target hosts (one per line, format HOST[:PORT]). Use -p/--port
+                        to set the default port for all hosts. Use --threads to control concurrent scans
+  -t N, --timeout N     timeout (in seconds) for connection and reading (default: 5)
+  -v, --verbose         enable verbose output
+  --conn-rate-test N[:max_rate]
+                        perform a connection rate test (useful for collecting metrics related to susceptibility of
+                        the DHEat vuln). Testing is conducted with N concurrent sockets with an optional maximum
+                        rate of connections per second
+  --dheat N[:kex[:e_len]]
+                        continuously perform the DHEat DoS attack (CVE-2002-20001) against the target using N
+                        concurrent sockets. Optionally, a specific key exchange algorithm can be specified instead
+                        of allowing it to be automatically chosen. Additionally, a small length of the fake e value
+                        sent to the server can be chosen for a more efficient attack (such as 4).
+  --lookup alg1[,alg2,...]
+                        looks up an algorithm(s) without connecting to a server.
+  --skip-rate-test      skip the connection rate test during standard audits (used to safely infer whether the DHEat
+                        attack is viable)
+  --threads N           number of threads to use when scanning multiple targets (-T/--targets) (default: 32)
 ```
 * if both IPv4 and IPv6 are used, order of precedence can be set by using either `-46` or `-64`.
 * batch flag `-b` will output sections without header and without empty lines (implies verbose flag).
@@ -130,6 +153,21 @@ To create a policy based on a target server (which can be manually edited):
 ssh-audit -M new_policy.txt targetserver
 ```
 
+To run the DHEat CPU exhaustion DoS attack ([CVE-2002-20001](https://nvd.nist.gov/vuln/detail/CVE-2002-20001)) against a target using 10 concurrent sockets:
+```
+ssh-audit --dheat=10 targetserver
+```
+
+To run the DHEat attack using the `diffie-hellman-group-exchange-sha256` key exchange algorithm:
+```
+ssh-audit --dheat=10:diffie-hellman-group-exchange-sha256 targetserver
+```
+
+To run the DHEat attack using the `diffie-hellman-group-exchange-sha256` key exchange algorithm along with very small but non-standard packet lengths (this may result in the same CPU exhaustion, but with many less bytes per second being sent):
+```
+ssh-audit --dheat=10:diffie-hellman-group-exchange-sha256:4 targetserver
+```
+
 ## Screenshots
 
 ### Server Standard Audit Example
@@ -151,7 +189,7 @@ Below is a screen shot of the client-auditing output when an unhardened OpenSSH 
 Guides to harden server & client configuration can be found here: [https://www.ssh-audit.com/hardening_guides.html](https://www.ssh-audit.com/hardening_guides.html)
 
 ## Pre-Built Packages
-Pre-built packages are available for Windows (see the releases page), PyPI, Snap, and Docker:
+Pre-built packages are available for Windows (see the [Releases](https://github.com/jtesta/ssh-audit/releases) page), PyPI, Snap, and Docker:
 
 To install from PyPI:
 ```
@@ -167,7 +205,7 @@ To install from Dockerhub:
 ```
 $ docker pull positronsecurity/ssh-audit
 ```
-(Then run with: `docker run -it -p 2222:2222 positronsecurity/ssh-audit 10.1.1.1`)
+(Then run with: `docker run -it --rm -p 2222:2222 positronsecurity/ssh-audit 10.1.1.1`)
 
 The status of various other platform packages can be found below (via Repology):
 
@@ -178,12 +216,57 @@ For convenience, a web front-end on top of the command-line tool is available at
 
 ## ChangeLog
 
-### v3.1.0-dev (???)
- - Added Python 3.12 to Tox tests.
- - In server policies, reduced expected DH modulus sizes from 4096 to 3072 to match online hardening guides (note that 3072-bit moduli provide the equivalent of 128-bit symmetric security).
- - In Ubuntu 22.04 client policy, moved host key types `sk-ssh-ed25519@openssh.com` and `ssh-ed25519` to the end of all certificate types.
- - Re-organized option host key types for OpenSSH 9.2 server policy to correspond with updated Debian 12 hardening guide.
+### v3.4.0-dev
+ - Added warning to all key exchanges that do not include protections against quantum attacks due to the Harvest Now, Decrypt Later strategy (see https://en.wikipedia.org/wiki/Harvest_now,_decrypt_later).
+ - Migrated from deprecated `getopt` module to `argparse`; partial credit [oam7575](https://github.com/oam7575).
+ - When running against multiple hosts, now prints each target host regardless of output level.
+ - Batch mode (`-b`) no longer automatically enables verbose mode, due to sometimes confusing results; users can still explicitly enable verbose mode using the `-v` flag.
+ - Added 2 new key exchanges: `mlkem768nistp256-sha256`, `mlkem1024nistp384-sha384`.
+
+### v3.3.0 (2024-10-15)
+ - Added Python 3.13 support.
+ - Added built-in policies for Ubuntu 24.04 LTS server & client, OpenSSH 9.8, and OpenSSH 9.9.
+ - Added IPv6 support for DHEat and connection rate tests.
+ - Added TCP port information to JSON policy scan results; credit [Fabian Malte Kopp](https://github.com/dreizehnutters).
+ - Added LANcom LCOS server recognition and Ed448 key extraction; credit [Daniel Lenski](https://github.com/dlenskiSB).
+  - Now reports ECDSA and DSS fingerprints when in verbose mode; partial credit [Daniel Lenski](https://github.com/dlenskiSB).
+ - Removed CVE information based on server/client version numbers, as this was wildly inaccurate (see [this thread](https://github.com/jtesta/ssh-audit/issues/240) for the full discussion, as well as the results of the community vote on this matter).
+ - Fixed crash when running with `-P` and `-T` options simultaneously.
+ - Fixed host key tests from only reporting a key type at most once despite multiple hosts supporting it; credit [Daniel Lenski](https://github.com/dlenskiSB).
+ - Fixed DHEat connection rate testing on MacOS X and BSD platforms; credit [Drew Noel](https://github.com/drewmnoel) and [Michael Osipov](https://github.com/michael-o).
+ - Fixed invalid JSON output when a socket error occurs while performing a client audit.
+ - Fixed `--conn-rate-test` feature on Windows.
+ - When scanning multiple targets (using `-T`/`--targets`), the `-p`/`--port` option will now be used as the default port (set to 22 if `-p`/`--port` is not given).  Hosts specified in the file can override this default with an explicit port number (i.e.: "host1:1234").  For example, when using `-T targets.txt -p 222`, all hosts in `targets.txt` that do not explicitly include a port number will default to 222; when using `-T targets.txt` (without `-p`), all hosts will use a default of 22.
+ - Updated built-in server & client policies for Amazon Linux 2023, Debian 12, Rocky Linux 9, and Ubuntu 22.04 to improve host key efficiency and cipher resistance to quantum attacks.
+ - Added 1 new cipher: `grasshopper-ctr128`.
+ - Added 2 new key exchanges: `mlkem768x25519-sha256`, `sntrup761x25519-sha512`.
+
+### v3.2.0 (2024-04-22)
+ - Added implementation of the DHEat denial-of-service attack (see `--dheat` option; [CVE-2002-20001](https://nvd.nist.gov/vuln/detail/CVE-2002-20001)).
+ - Expanded filter of CBC ciphers to flag for the Terrapin vulnerability.  It now includes more rarely found ciphers.
+ - Fixed parsing of `ecdsa-sha2-nistp*` CA signatures on host keys.  Additionally, they are now flagged as potentially back-doored, just as standard host keys are.
+ - Gracefully handle rare exceptions (i.e.: crashes) while performing GEX tests.
+ - The built-in man page (`-m`, `--manual`) is now available on Docker, PyPI, and Snap builds, in addition to the Windows build.
+ - Snap builds are now architecture-independent.
+ - Changed Docker base image from `python:3-slim` to `python:3-alpine`, resulting in a 59% reduction in image size; credit [Daniel Thamdrup](https://github.com/dallemon).
+ - Added built-in policies for Amazon Linux 2023, Debian 12, OpenSSH 9.7, and Rocky Linux 9.
+ - Built-in policies now include a change log (use `-L -v` to view them).
+ - Custom policies now support the `allow_algorithm_subset_and_reordering` directive to allow targets to pass with a subset and/or re-ordered list of host keys, kex, ciphers, and MACs.  This allows for the creation of a baseline policy where targets can optionally implement stricter controls; partial credit [yannik1015](https://github.com/yannik1015).
+ - Custom policies now support the `allow_larger_keys` directive to allow targets to pass with larger host keys, CA keys, and Diffie-Hellman keys.  This allows for the creation of a baseline policy where targets can optionally implement stricter controls; partial credit [Damian Szuberski](https://github.com/szubersk).
+ - Color output is disabled if the `NO_COLOR` environment variable is set (see https://no-color.org/).
+ - Added 1 new key exchange algorithm: `gss-nistp384-sha384-*`.
+ - Added 1 new cipher: `aes128-ocb@libassh.org`.
+
+### v3.1.0 (2023-12-20)
+ - Added test for the Terrapin message prefix truncation vulnerability ([CVE-2023-48795](https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2023-48795)).
  - Dropped support for Python 3.7 (EOL was reached in June 2023).
+ - Added Python 3.12 support.
+ - In server policies, reduced expected DH modulus sizes from 4096 to 3072 to match the [online hardening guides](https://ssh-audit.com/hardening_guides.html) (note that 3072-bit moduli provide the equivalent of 128-bit symmetric security).
+ - In Ubuntu 22.04 client policy, moved host key types `sk-ssh-ed25519@openssh.com` and `ssh-ed25519` to the end of all certificate types.
+ - Updated Ubuntu Server & Client policies for 20.04 and 22.04 to account for key exchange list changes due to Terrapin vulnerability patches.
+ - Re-organized option host key types for OpenSSH 9.2 server policy to correspond with updated Debian 12 hardening guide.
+ - Added built-in policies for OpenSSH 9.5 and 9.6.
+ - Added an `additional_notes` field to the JSON output.
 
 ### v3.0.0 (2023-09-07)
  - Results from concurrent scans against multiple hosts are no longer improperly combined; bug discovered by [Adam Russell](https://github.com/thecliguy).
